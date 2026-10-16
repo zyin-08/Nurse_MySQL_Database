@@ -15,4 +15,17 @@ class NurseRepository extends ServiceEntityRepository
     {
         parent::__construct($registry, Nurse::class);
     }
+
+    /**
+     * @return Nurse[]
+     */
+    public function findByEmailOrName(string $username): array
+    {
+        return $this->createQueryBuilder('n')
+            ->where('n.email = :username')
+            ->orWhere('n.name = :username')
+            ->setParameter('username', $username)
+            ->getQuery()
+            ->getResult();
+    }
 }
