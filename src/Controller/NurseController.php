@@ -2,6 +2,8 @@
 
 namespace App\Controller;
 
+use App\Entity\Nurse;
+use App\Repository\NurseRepository;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -10,37 +12,29 @@ use Symfony\Component\Routing\Attribute\Route;
 
 class NurseController extends AbstractController
 {
+    public function __construct(private NurseRepository $nurseRepository)
+    {
+    }
+
     #[Route('/nurse/name/{name}', name: 'nurse_find_by_name', methods: ['GET'])]
     public function findByName(string $name): JsonResponse
     {
-        $filePath = $this->getParameter('kernel.project_dir') . '/data/nurses.json';
-        $nurses = json_decode(file_get_contents($filePath), true) ?? [];
+        // The utf8mb4_unicode_ci collation makes this comparison case-insensitive
+        $nurse = $this->nurseRepository->findOneBy(['name' => $name]);
 
-        foreach ($nurses as $nurse) {
-            if (strcasecmp($nurse['name'], $name) === 0) {
-                return $this->json($nurse);
-            }
+        if (!$nurse) {
+            return $this->json(['error' => 'Nurse not found'], Response::HTTP_NOT_FOUND);
         }
 
-        return $this->json(['error' => 'Nurse not found'], Response::HTTP_NOT_FOUND);
+        return $this->json($this->toArray($nurse));
     }
 
     #[Route('/nurse/index', name: 'nurse_index', methods: ['GET'])]
     public function getAll(): JsonResponse
     {
-        $file = $this->getParameter('kernel.project_dir') . '/data/nurses.json';
+        $nurses = $this->nurseRepository->findAll();
 
-        if (!is_file($file)) {
-            return $this->json(['error' => 'nurses.json not found'], Response::HTTP_INTERNAL_SERVER_ERROR);
-        }
-
-        $nurses = json_decode(file_get_contents($file), true);
-
-        if (!is_array($nurses)) {
-            return $this->json(['error' => 'nurses.json is not valid'], Response::HTTP_INTERNAL_SERVER_ERROR);
-        }
-
-        return $this->json($nurses);
+        return $this->json(array_map($this->toArray(...), $nurses));
     }
 
     #[Route('/nurse/login', name: 'nurse_login', methods: ['POST'])]
@@ -54,18 +48,24 @@ class NurseController extends AbstractController
             return $this->json(['success' => false, 'message' => 'Username and password are required'], Response::HTTP_BAD_REQUEST);
         }
 
-        $filePath = $this->getParameter('kernel.project_dir') . '/data/nurses.json';
-        $nurses = json_decode(file_get_contents($filePath), true) ?? [];
-
-        foreach ($nurses as $nurse) {
-            if (
-                (strcasecmp($nurse['email'] ?? '', $username) === 0 || strcasecmp($nurse['name'] ?? '', $username) === 0)
-                && $nurse['password'] === $password
-            ) {
+        foreach ($this->nurseRepository->findByEmailOrName($username) as $nurse) {
+            if (password_verify($password, $nurse->getPassword())) {
                 return $this->json(['success' => true]);
             }
         }
 
         return $this->json(['success' => false], Response::HTTP_UNAUTHORIZED);
+    }
+
+    /**
+     * The password hash is never exposed in API responses.
+     */
+    private function toArray(Nurse $nurse): array
+    {
+        return [
+            'id' => $nurse->getId(),
+            'name' => $nurse->getName(),
+            'email' => $nurse->getEmail(),
+        ];
     }
 }

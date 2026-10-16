@@ -87,13 +87,14 @@ classDiagram
     class AbstractController {
         <<Symfony Framework>>
         +json(data, status, headers, context) JsonResponse
-        +getParameter(name) mixed
     }
 
     class NurseController {
+        -NurseRepository nurseRepository
         +getAll() JsonResponse
         +findByName(name: string) JsonResponse
         +login(request: Request) JsonResponse
+        -toArray(nurse: Nurse) array
     }
 
     class JsonResponse {
@@ -107,24 +108,38 @@ classDiagram
         +getContent() string
     }
 
-    class NurseEntity {
-        <<Data Model>>
-        +int id
-        +string name
-        +string email
-        +string password
+    class Nurse {
+        <<Doctrine Entity>>
+        -int id
+        -string name
+        -string email
+        -string password
     }
 
-    class NursesStorage {
-        <<JSON File: data/nurses.json>>
-        +1000 items
+    class NurseRepository {
+        <<ServiceEntityRepository>>
+        +findAll() Nurse[]
+        +findOneBy(criteria) Nurse
+        +findByEmailOrName(username: string) Nurse[]
+    }
+
+    class ImportNursesCommand {
+        <<Console Command: app:import-nurses>>
+        +execute(input, output) int
+    }
+
+    class Database {
+        <<MariaDB/MySQL: tabla nurse>>
     }
 
     AbstractController <|-- NurseController
     NurseController ..> Request : recibe
     NurseController ..> JsonResponse : retorna
-    NurseController ..> NursesStorage : lee y decodifica
-    NursesStorage "1" *-- "1000" NurseEntity : almacena
+    NurseController --> NurseRepository : consulta
+    NurseRepository ..> Nurse : devuelve
+    NurseRepository ..> Database : Doctrine ORM
+    ImportNursesCommand ..> Nurse : crea desde data/nurses.json
+    ImportNursesCommand ..> Database : persiste
     Kernel ..> NurseController : enruta peticiones
 ```
 
@@ -139,17 +154,20 @@ sequenceDiagram
     actor Cliente as 📱 Cliente / Postman
     participant Router as 🧭 Symfony Router
     participant Ctrl as 🎮 NurseController
-    participant FS as 📁 data/nurses.json
+    participant Repo as 📚 NurseRepository
+    participant BD as 🗄️ Base de datos
 
     Cliente->>Router: POST /nurse/login (body: username, password)
     Router->>Ctrl: login(Request $request)
     alt Falta username o password
         Ctrl-->>Cliente: 400 Bad Request {"success": false, "message": "..."}
     else Parámetros presentes
-        Ctrl->>FS: file_get_contents() + json_decode()
-        FS-->>Ctrl: Array de enfermeros
-        loop Búsqueda por email o nombre (case-insensitive)
-            Ctrl->>Ctrl: Comparar (email == username || name == username) && password == pw
+        Ctrl->>Repo: findByEmailOrName(username)
+        Repo->>BD: SELECT ... WHERE email = :u OR name = :u
+        BD-->>Repo: Enfermeros que coinciden (case-insensitive)
+        Repo-->>Ctrl: Nurse[]
+        loop Comprobación de contraseña
+            Ctrl->>Ctrl: password_verify(password, hash)
         end
         alt Credenciales correctas
             Ctrl-->>Cliente: 200 OK {"success": true}
@@ -166,21 +184,16 @@ sequenceDiagram
     actor Cliente as 📱 Cliente / Postman
     participant Router as 🧭 Symfony Router
     participant Ctrl as 🎮 NurseController
-    participant FS as 📁 data/nurses.json
+    participant Repo as 📚 NurseRepository
+    participant BD as 🗄️ Base de datos
 
     Cliente->>Router: GET /nurse/index
     Router->>Ctrl: getAll()
-    Ctrl->>FS: is_file(data/nurses.json)?
-    alt Archivo no encontrado
-        Ctrl-->>Cliente: 500 Internal Server Error {"error": "nurses.json not found"}
-    else Archivo existe
-        Ctrl->>FS: json_decode(file_get_contents())
-        alt JSON no válido
-            Ctrl-->>Cliente: 500 Internal Server Error {"error": "nurses.json is not valid"}
-        else JSON correcto
-            Ctrl-->>Cliente: 200 OK [ Array con 1.000 enfermeros ]
-        end
-    end
+    Ctrl->>Repo: findAll()
+    Repo->>BD: SELECT ... FROM nurse
+    BD-->>Repo: Filas
+    Repo-->>Ctrl: Nurse[]
+    Ctrl-->>Cliente: 200 OK [ Array con 1.000 enfermeros, sin password ]
 ```
 
 #### C. Búsqueda por Nombre (`GET /nurse/name/{name}`)
@@ -190,17 +203,17 @@ sequenceDiagram
     actor Cliente as 📱 Cliente / Postman
     participant Router as 🧭 Symfony Router
     participant Ctrl as 🎮 NurseController
-    participant FS as 📁 data/nurses.json
+    participant Repo as 📚 NurseRepository
+    participant BD as 🗄️ Base de datos
 
     Cliente->>Router: GET /nurse/name/{name}
     Router->>Ctrl: findByName(string $name)
-    Ctrl->>FS: file_get_contents() + json_decode()
-    FS-->>Ctrl: Array de enfermeros
-    loop Coincidencia sin distinción de mayúsculas
-        Ctrl->>Ctrl: strcasecmp(nurse['name'], name) === 0
-    end
+    Ctrl->>Repo: findOneBy(name)
+    Repo->>BD: SELECT ... WHERE name = :name (case-insensitive)
+    BD-->>Repo: Fila o ninguna
+    Repo-->>Ctrl: Nurse o null
     alt Enfermero localizado
-        Ctrl-->>Cliente: 200 OK { "id": 1, "name": "Ana", ... }
+        Ctrl-->>Cliente: 200 OK { "id": 1, "name": "Ana", "email": "..." }
     else No encontrado
         Ctrl-->>Cliente: 404 Not Found {"error": "Nurse not found"}
     end
@@ -217,22 +230,20 @@ flowchart TD
     RouteCheck -- Sí --> EndpointSwitch{Selección de Endpoint}
 
     %% Rama /nurse/index
-    EndpointSwitch -- GET /nurse/index --> CheckFile1{¿Existe nurses.json?}
-    CheckFile1 -- No --> Err500_1[500: nurses.json not found]
-    CheckFile1 -- Sí --> Parse1{¿JSON parseable?}
-    Parse1 -- No --> Err500_2[500: nurses.json is not valid]
-    Parse1 -- Sí --> Resp200_All[200 OK: Lista total de enfermeros]
+    EndpointSwitch -- GET /nurse/index --> FindAll[NurseRepository::findAll]
+    FindAll --> Resp200_All[200 OK: Lista total de enfermeros]
 
     %% Rama /nurse/name/{name}
-    EndpointSwitch -- GET /nurse/name/{name} --> LoadFile2[Cargar nurses.json]
-    LoadFile2 --> LoopSearch{¿Coincide strcasecmp?}
-    LoopSearch -- Sí --> Resp200_Nurse[200 OK: Objeto del enfermero]
-    LoopSearch -- No --> Err404_Nurse[404 Not Found: Nurse not found]
+    EndpointSwitch -- GET /nurse/name/{name} --> FindOne[NurseRepository::findOneBy name]
+    FindOne --> Found{¿Existe?}
+    Found -- Sí --> Resp200_Nurse[200 OK: Objeto del enfermero]
+    Found -- No --> Err404_Nurse[404 Not Found: Nurse not found]
 
     %% Rama /nurse/login
     EndpointSwitch -- POST /nurse/login --> CheckBody{¿Vienen username y password?}
     CheckBody -- No --> Err400[400 Bad Request: Username and password required]
-    CheckBody -- Sí --> MatchCreds{¿Coinciden credenciales?}
+    CheckBody -- Sí --> FindUser[NurseRepository::findByEmailOrName]
+    FindUser --> MatchCreds{¿password_verify correcto?}
     MatchCreds -- Sí --> Resp200_Log[200 OK: success true]
     MatchCreds -- No --> Err401[401 Unauthorized: success false]
 ```
@@ -245,8 +256,8 @@ flowchart TD
 
 | Método | Ruta | Parámetros | Códigos HTTP | Descripción |
 |---|---|---|---|---|
-| `GET` | `/nurse/index` | *Ninguno* | `200`, `500` | Devuelve el catálogo completo de 1.000 enfermeros. |
-| `GET` | `/nurse/name/{name}` | Path: `{name}` | `200`, `404` | Localiza un enfermero por su nombre (*case-insensitive*). |
+| `GET` | `/nurse/index` | *Ninguno* | `200` | Devuelve el catálogo completo de 1.000 enfermeros (`id`, `name`, `email`). |
+| `GET` | `/nurse/name/{name}` | Path: `{name}` | `200`, `404` | Localiza un enfermero por su nombre (*case-insensitive*). No devuelve `password`. |
 | `POST` | `/nurse/login` | Body JSON: `username`, `password` | `200`, `400`, `401` | Inicia sesión verificando credenciales contra email o nombre. |
 
 ### Colección de Pruebas Postman
@@ -257,29 +268,25 @@ El repositorio incluye la suite de pruebas lista para importar:
 
 ---
 
-## 💾 5. Modelo de Datos (`data/nurses.json`)
+## 💾 5. Modelo de Datos (tabla `nurse`)
 
-Los datos se leen directamente desde [`data/nurses.json`](data/nurses.json) con la siguiente estructura:
+Los datos se guardan en una base de datos **MariaDB/MySQL** gestionada con **Doctrine ORM**. La tabla se genera desde la entidad [`src/Entity/Nurse.php`](src/Entity/Nurse.php) mediante una migración:
 
-```json
-[
-  {
-    "id": 1,
-    "name": "Ana",
-    "email": "ana@hospital.com",
-    "password": "ana123"
-  },
-  {
-    "id": 2,
-    "name": "Carlos",
-    "email": "carlos@hospital.com",
-    "password": "carlos123"
-  }
-]
+```sql
+CREATE TABLE nurse (
+  id INT AUTO_INCREMENT NOT NULL,
+  name VARCHAR(100) NOT NULL,
+  email VARCHAR(180) NOT NULL,
+  password VARCHAR(255) NOT NULL,
+  UNIQUE INDEX uniq_nurse_email (email),
+  PRIMARY KEY (id)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci ENGINE = InnoDB
 ```
 
+Los 1.000 enfermeros de prueba de [`data/nurses.json`](data/nurses.json) se cargan con `php bin/console app:import-nurses`.
+
 > [!NOTE]
-> Las contraseñas se almacenan en texto plano temporalmente debido al alcance estático de esta fase pedagógica inicial. En futuras fases se incorporará **Doctrine ORM**, migraciones a base de datos relacional y hashing de contraseñas.
+> Las contraseñas se guardan **cifradas con hash** (`password_hash`) y se comprueban con `password_verify`. La API nunca devuelve el campo `password`.
 
 ---
 
@@ -329,6 +336,7 @@ gitGraph
 ### Requisitos Previos
 * **PHP >= 8.2** con extensiones comunes (`json`, `mbstring`, `ctype`).
 * **Composer** (v2 o superior).
+* **MariaDB** o **MySQL** (por ejemplo, el de XAMPP).
 * *(Opcional)* **Symfony CLI**.
 
 ### Puesta en Marcha
@@ -343,8 +351,15 @@ composer install
 
 # 3. Configurar entorno local
 cp .env.example .env
+# Añade DATABASE_URL en .env.local (no se sube a Git), por ejemplo para XAMPP:
+# DATABASE_URL="mysql://root:@127.0.0.1:3306/nurse_simulator?serverVersion=10.4.32-MariaDB&charset=utf8mb4"
 
-# 4. Iniciar el servidor de desarrollo
+# 4. Crear la base de datos, la tabla y cargar los enfermeros
+php bin/console doctrine:database:create
+php bin/console doctrine:migrations:migrate
+php bin/console app:import-nurses
+
+# 5. Iniciar el servidor de desarrollo
 symfony server:start
 # O alternativamente con PHP CLI:
 php -S localhost:8000 -t public
@@ -378,7 +393,7 @@ Nurse-Simulator/
 │   ├── routes.yaml
 │   └── services.yaml
 ├── data/
-│   └── nurses.json                # Dataset JSON de prueba (1.000 enfermeros)
+│   └── nurses.json                # Dataset inicial (1.000 enfermeros) para app:import-nurses
 ├── docs/
 │   ├── general/
 │   │   ├── DOCUMENTACION_ES.md    # Memoria técnica completa en español
@@ -390,11 +405,18 @@ Nurse-Simulator/
 │       ├── readAll/
 │       ├── readByName/
 │       └── nurse-api.postman_collection.json
+├── migrations/                    # Migraciones de Doctrine (tabla nurse)
 ├── public/
 │   └── index.php                  # Front Controller
 ├── src/
+│   ├── Command/
+│   │   └── ImportNursesCommand.php # Comando app:import-nurses
 │   ├── Controller/
 │   │   └── NurseController.php    # Controlador con todos los endpoints
+│   ├── Entity/
+│   │   └── Nurse.php              # Entidad Doctrine
+│   ├── Repository/
+│   │   └── NurseRepository.php    # Consultas de enfermeros
 │   └── Kernel.php                 # Kernel de la aplicación
 ├── .env.example                   # Plantilla de variables de entorno
 ├── composer.json                  # Dependencias y autoloading

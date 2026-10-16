@@ -12,7 +12,7 @@
 
 **Nurse Simulator** es una API REST desarrollada con **Symfony 7.4** y **PHP 8.2+** cuyo objetivo es simular la gestión del personal de enfermería de un centro hospitalario. 
 
-El proyecto está planteado como un trabajo académico en equipo, concebido para evolucionar incrementalmente a lo largo de diversas fases de desarrollo. En esta primera fase, la API expone servicios web esenciales para la consulta, filtrado e inicio de sesión de enfermeros/as, operando con un sistema de almacenamiento desacoplado de bases de datos relacionales tradicionales.
+El proyecto está planteado como un trabajo académico en equipo, concebido para evolucionar incrementalmente a lo largo de diversas fases de desarrollo. La API expone servicios web esenciales para la consulta, filtrado e inicio de sesión de enfermeros/as. En la primera fase los datos se leían de un archivo JSON; en la segunda fase el almacenamiento se ha migrado a una base de datos relacional (MariaDB/MySQL) gestionada con **Doctrine ORM**.
 
 ### Equipo de Desarrollo y Roles
 
@@ -27,24 +27,24 @@ El proyecto está planteado como un trabajo académico en equipo, concebido para
 
 ## 2. Arquitectura de Datos y Almacenamiento
 
-En la fase actual, la aplicación no hace uso de una base de datos relacional (como MySQL o PostgreSQL), sino que persiste y consulta la información a partir de un archivo estructurado en formato JSON:
+La aplicación persiste y consulta la información en una base de datos relacional **MariaDB/MySQL** mediante **Doctrine ORM**:
 
-* **Ruta del archivo:** [`data/nurses.json`](file:///C:/Users/Ignacio/Desktop/Nurse-Simulator/data/nurses.json)
-* **Volumen:** Contiene 1.000 registros de prueba generados para evaluar el rendimiento y comportamiento de la API con volúmenes realistas.
+* **Base de datos:** `nurse_simulator` (`utf8mb4`, colación `utf8mb4_unicode_ci`)
+* **Tabla:** `nurse`, generada a partir de la entidad [`src/Entity/Nurse.php`](../../src/Entity/Nurse.php) con una migración de Doctrine.
+* **Acceso a datos:** [`src/Repository/NurseRepository.php`](../../src/Repository/NurseRepository.php)
+* **Datos iniciales:** los 1.000 registros de prueba de [`data/nurses.json`](../../data/nurses.json) se cargan en la tabla con el comando `php bin/console app:import-nurses`.
 
 ### Estructura de la Entidad Nurse
 
-Cada registro en [`data/nurses.json`](file:///C:/Users/Ignacio/Desktop/Nurse-Simulator/data/nurses.json) cuenta con la siguiente estructura de datos:
+| Campo | Tipo en BD | Restricciones | Descripción |
+|---|---|---|---|
+| `id` | `INT` | `AUTO_INCREMENT`, clave primaria | Identificador único del enfermero/a |
+| `name` | `VARCHAR(100)` | `NOT NULL` | Nombre del enfermero/a |
+| `email` | `VARCHAR(180)` | `NOT NULL`, único (`uniq_nurse_email`) | Dirección de correo electrónico |
+| `password` | `VARCHAR(255)` | `NOT NULL` | Hash de la clave de acceso |
 
-| Campo | Tipo de dato | Descripción |
-|---|---|---|
-| `id` | `int` | Identificador único del enfermero/a |
-| `name` | `string` | Nombre del enfermero/a |
-| `email` | `string` | Dirección de correo electrónico |
-| `password` | `string` | Clave de acceso |
-
-> [!WARNING]
-> Las contraseñas se almacenan actualmente en **texto plano** exclusivamente con fines educativos y de prueba local. En fases posteriores se implementará hashing criptográfico (`PasswordHasherInterface`) y autenticación basada en tokens o sesiones seguras.
+> [!NOTE]
+> Las contraseñas se guardan **cifradas con hash** (`password_hash`, bcrypt) y se comprueban con `password_verify`. La API nunca devuelve el campo `password` en sus respuestas.
 
 ---
 
@@ -109,6 +109,18 @@ flowchart LR
   4. Si no se localiza ningún registro con ese nombre, retorna HTTP 404 con `{"error": "Nurse not found"}`.
   5. En esta misma fase se amplió el dataset de prueba a 1.000 enfermeros.
 
+### 4.5. Migración a Base de Datos con Doctrine ORM
+* **Ramas:** `38-setup-doctrine-orm-and-nurse-entity` y `39-move-nurses-to-database`
+* **Implementación:**
+  1. Instalación de **Doctrine ORM** y **Doctrine Migrations**. La conexión se configura en `.env.local` con `DATABASE_URL`, que no se sube a Git.
+  2. Creación de la entidad [`Nurse`](../../src/Entity/Nurse.php), su repositorio [`NurseRepository`](../../src/Repository/NurseRepository.php) y la migración que crea la tabla `nurse`. Las tablas usan por defecto InnoDB y `utf8mb4_unicode_ci` ([`config/packages/doctrine.yaml`](../../config/packages/doctrine.yaml)).
+  3. Comando [`app:import-nurses`](../../src/Command/ImportNursesCommand.php): importa los enfermeros de `data/nurses.json` cifrando sus contraseñas. Salta los emails que ya existen, por lo que se puede ejecutar varias veces sin duplicar datos.
+  4. [`NurseController`](../../src/Controller/NurseController.php) deja de leer el archivo JSON y consulta la base de datos a través de `NurseRepository`. Las rutas y los códigos de respuesta se mantienen, excepto:
+     * Las respuestas ya no incluyen el campo `password`.
+     * `GET /nurse/index` ya no devuelve los errores 500 de `nurses.json`.
+  5. La búsqueda por nombre y el login siguen sin distinguir mayúsculas y minúsculas en `name` y `email`, gracias a la colación `utf8mb4_unicode_ci`. La contraseña sí distingue mayúsculas.
+* **Comparación con el modelo esperado:** `doctrine:schema:validate` confirma que la base de datos está sincronizada con la entidad. La única diferencia con el SQL esperado es la tabla `doctrine_migration_versions`, que Doctrine Migrations usa para registrar las migraciones ejecutadas.
+
 ---
 
 ## 5. Especificación de Endpoints de la API
@@ -117,8 +129,8 @@ flowchart LR
 
 | Método | Endpoint | Parámetros | Respuestas esperadas |
 |---|---|---|---|
-| `GET` | `/nurse/index` | Ninguno | `200 OK`: Lista completa de enfermeros<br>`500 Internal Server Error`: Archivo ausente o JSON corrupto |
-| `GET` | `/nurse/name/{name}` | Path param: `name` (string) | `200 OK`: Objeto del enfermero<br>`404 Not Found`: `{ "error": "Nurse not found" }` |
+| `GET` | `/nurse/index` | Ninguno | `200 OK`: Lista completa de enfermeros (`id`, `name`, `email`) |
+| `GET` | `/nurse/name/{name}` | Path param: `name` (string) | `200 OK`: Objeto del enfermero (`id`, `name`, `email`)<br>`404 Not Found`: `{ "error": "Nurse not found" }` |
 | `POST` | `/nurse/login` | JSON Body: `username`, `password` | `200 OK`: `{ "success": true }`<br>`400 Bad Request`: Parámetros obligatorios faltantes<br>`401 Unauthorized`: `{ "success": false }` |
 
 ### Ejemplos de Petición y Respuesta
@@ -133,14 +145,12 @@ curl -X GET http://localhost:8000/nurse/index
   {
     "id": 1,
     "name": "Ana",
-    "email": "ana@hospital.com",
-    "password": "ana123"
+    "email": "ana@hospital.com"
   },
   {
     "id": 2,
     "name": "Carlos",
-    "email": "carlos@hospital.com",
-    "password": "carlos123"
+    "email": "carlos@hospital.com"
   }
 ]
 ```
@@ -154,8 +164,7 @@ curl -X GET http://localhost:8000/nurse/name/Ana
 {
   "id": 1,
   "name": "Ana",
-  "email": "ana@hospital.com",
-  "password": "ana123"
+  "email": "ana@hospital.com"
 }
 ```
 **Error (HTTP 404):**
@@ -232,13 +241,14 @@ classDiagram
     class AbstractController {
         <<Symfony Framework>>
         +json(data, status, headers, context) JsonResponse
-        +getParameter(name) mixed
     }
 
     class NurseController {
+        -NurseRepository nurseRepository
         +getAll() JsonResponse
         +findByName(name: string) JsonResponse
         +login(request: Request) JsonResponse
+        -toArray(nurse: Nurse) array
     }
 
     class JsonResponse {
@@ -252,24 +262,38 @@ classDiagram
         +getContent() string
     }
 
-    class NurseEntity {
-        <<Data Model>>
-        +int id
-        +string name
-        +string email
-        +string password
+    class Nurse {
+        <<Doctrine Entity>>
+        -int id
+        -string name
+        -string email
+        -string password
     }
 
-    class NursesStorage {
-        <<JSON File: data/nurses.json>>
-        +1000 items
+    class NurseRepository {
+        <<ServiceEntityRepository>>
+        +findAll() Nurse[]
+        +findOneBy(criteria) Nurse
+        +findByEmailOrName(username: string) Nurse[]
+    }
+
+    class ImportNursesCommand {
+        <<Console Command: app:import-nurses>>
+        +execute(input, output) int
+    }
+
+    class Database {
+        <<MariaDB/MySQL: tabla nurse>>
     }
 
     AbstractController <|-- NurseController
     NurseController ..> Request : recibe
     NurseController ..> JsonResponse : retorna
-    NurseController ..> NursesStorage : lee y decodifica
-    NursesStorage "1" *-- "1000" NurseEntity : almacena
+    NurseController --> NurseRepository : consulta
+    NurseRepository ..> Nurse : devuelve
+    NurseRepository ..> Database : Doctrine ORM
+    ImportNursesCommand ..> Nurse : crea desde data/nurses.json
+    ImportNursesCommand ..> Database : persiste
     Kernel ..> NurseController : enruta peticiones
 ```
 
@@ -280,15 +304,15 @@ sequenceDiagram
     actor Cliente as Cliente HTTP
     participant Kernel as Symfony Kernel
     participant Controller as NurseController
-    participant JSON as data/nurses.json
+    participant Repo as NurseRepository
+    participant BD as Base de datos
 
     Cliente->>Kernel: GET /nurse/name/{name}
     Kernel->>Controller: findByName(name)
-    Controller->>JSON: file_get_contents + json_decode
-    JSON-->>Controller: Lista de enfermeros
-    loop Comparación de enfermeros
-        Controller->>Controller: strcasecmp(nurse.name, name)
-    end
+    Controller->>Repo: findOneBy(name)
+    Repo->>BD: SELECT ... WHERE name = :name
+    BD-->>Repo: Fila o ninguna
+    Repo-->>Controller: Nurse o null
     alt Coincidencia encontrada
         Controller-->>Cliente: 200 OK (Datos de enfermero en JSON)
     else No encontrado
@@ -303,17 +327,20 @@ sequenceDiagram
     actor Cliente as Cliente HTTP
     participant Kernel as Symfony Kernel
     participant Controller as NurseController
-    participant JSON as data/nurses.json
+    participant Repo as NurseRepository
+    participant BD as Base de datos
 
     Cliente->>Kernel: POST /nurse/login (username, password)
     Kernel->>Controller: login(Request)
     alt Faltan datos (username o password)
         Controller-->>Cliente: 400 Bad Request
     else Datos completos
-        Controller->>JSON: Lectura del fichero
-        JSON-->>Controller: Lista de enfermeros
+        Controller->>Repo: findByEmailOrName(username)
+        Repo->>BD: SELECT ... WHERE email = :u OR name = :u
+        BD-->>Repo: Enfermeros que coinciden
+        Repo-->>Controller: Nurse[]
         loop Validación
-            Controller->>Controller: Verificar email/name y password
+            Controller->>Controller: password_verify(password, hash)
         end
         alt Credenciales correctas
             Controller-->>Cliente: 200 OK {"success": true}
@@ -329,20 +356,15 @@ sequenceDiagram
 sequenceDiagram
     actor Cliente as Cliente HTTP
     participant Controller as NurseController
-    participant JSON as data/nurses.json
+    participant Repo as NurseRepository
+    participant BD as Base de datos
 
     Cliente->>Controller: GET /nurse/index
-    Controller->>JSON: ¿is_file(data/nurses.json)?
-    alt Archivo no existe
-        Controller-->>Cliente: 500 Internal Server Error {"error": "nurses.json not found"}
-    else Archivo existe
-        Controller->>JSON: json_decode(file_get_contents())
-        alt JSON no válido
-            Controller-->>Cliente: 500 Internal Server Error {"error": "nurses.json is not valid"}
-        else JSON correcto
-            Controller-->>Cliente: 200 OK (Array de enfermeros)
-        end
-    end
+    Controller->>Repo: findAll()
+    Repo->>BD: SELECT ... FROM nurse
+    BD-->>Repo: Filas
+    Repo-->>Controller: Nurse[]
+    Controller-->>Cliente: 200 OK (Array de enfermeros sin password)
 ```
 
 ### 6.6. Diagrama de Flujo Lógico de la Aplicación
@@ -354,22 +376,20 @@ flowchart TD
     RouteCheck -- Sí --> EndpointSwitch{Selección de Endpoint}
 
     %% Rama /nurse/index
-    EndpointSwitch -- GET /nurse/index --> CheckFile1{¿Existe nurses.json?}
-    CheckFile1 -- No --> Err500_1[500: nurses.json not found]
-    CheckFile1 -- Sí --> Parse1{¿JSON parseable?}
-    Parse1 -- No --> Err500_2[500: nurses.json is not valid]
-    Parse1 -- Sí --> Resp200_All[200 OK: Lista total de enfermeros]
+    EndpointSwitch -- GET /nurse/index --> FindAll[NurseRepository::findAll]
+    FindAll --> Resp200_All[200 OK: Lista total de enfermeros]
 
     %% Rama /nurse/name/{name}
-    EndpointSwitch -- GET /nurse/name/{name} --> LoadFile2[Cargar nurses.json]
-    LoadFile2 --> LoopSearch{¿Coincide strcasecmp?}
-    LoopSearch -- Sí --> Resp200_Nurse[200 OK: Objeto del enfermero]
-    LoopSearch -- No --> Err404_Nurse[404 Not Found: Nurse not found]
+    EndpointSwitch -- GET /nurse/name/{name} --> FindOne[NurseRepository::findOneBy name]
+    FindOne --> Found{¿Existe?}
+    Found -- Sí --> Resp200_Nurse[200 OK: Objeto del enfermero]
+    Found -- No --> Err404_Nurse[404 Not Found: Nurse not found]
 
     %% Rama /nurse/login
     EndpointSwitch -- POST /nurse/login --> CheckBody{¿Vienen username y password?}
     CheckBody -- No --> Err400[400 Bad Request: Username and password required]
-    CheckBody -- Sí --> MatchCreds{¿Coinciden credenciales?}
+    CheckBody -- Sí --> FindUser[NurseRepository::findByEmailOrName]
+    FindUser --> MatchCreds{¿password_verify correcto?}
     MatchCreds -- Sí --> Resp200_Log[200 OK: success true]
     MatchCreds -- No --> Err401[401 Unauthorized: success false]
 ```
@@ -399,7 +419,7 @@ Nurse-Simulator/
 │   ├── routes.yaml
 │   └── services.yaml
 ├── data/
-│   └── nurses.json                 # Dataset simulado (1000 enfermeros)
+│   └── nurses.json                 # Dataset inicial (1000 enfermeros) para app:import-nurses
 ├── docs/                           # Documentación del proyecto
 │   ├── general/
 │   │   ├── DOCUMENTACION_ES.md     # Documentación detallada en español
@@ -411,11 +431,18 @@ Nurse-Simulator/
 │       ├── readAll/
 │       ├── readByName/
 │       └── nurse-api.postman_collection.json
+├── migrations/                     # Migraciones de Doctrine (creación de la tabla nurse)
 ├── public/
 │   └── index.php                   # Punto de entrada HTTP (Front Controller)
 ├── src/
+│   ├── Command/
+│   │   └── ImportNursesCommand.php # Comando app:import-nurses
 │   ├── Controller/
 │   │   └── NurseController.php     # Controlador con las rutas de enfermeros
+│   ├── Entity/
+│   │   └── Nurse.php               # Entidad Doctrine (tabla nurse)
+│   ├── Repository/
+│   │   └── NurseRepository.php     # Consultas de enfermeros
 │   └── Kernel.php                  # Núcleo de la aplicación Symfony
 ├── .env.example                    # Plantilla de variables de entorno
 ├── composer.json                   # Definición de dependencias PHP y scripts
@@ -430,6 +457,7 @@ Nurse-Simulator/
 ### Prerrequisitos
 * **PHP** >= 8.2 (con extensiones `mbstring`, `json`, `ctype`, etc.)
 * **Composer** >= 2.0
+* **MariaDB** o **MySQL** (por ejemplo, el de XAMPP)
 * *(Opcional)* **Symfony CLI**
 
 ### Pasos de Instalación
@@ -449,8 +477,21 @@ Nurse-Simulator/
    ```bash
    cp .env.example .env
    ```
+   Añade la conexión a la base de datos en `.env.local` (no se sube a Git). El `serverVersion` debe coincidir con tu servidor (`SELECT VERSION();`):
+   ```dotenv
+   # XAMPP (MariaDB)
+   DATABASE_URL="mysql://root:@127.0.0.1:3306/nurse_simulator?serverVersion=10.4.32-MariaDB&charset=utf8mb4"
+   ```
 
-4. **Iniciar el servidor local:**
+4. **Crear la base de datos y cargar los datos:**
+   ```bash
+   php bin/console doctrine:database:create
+   php bin/console doctrine:migrations:migrate
+   php bin/console app:import-nurses
+   ```
+   La importación tarda alrededor de un minuto porque cifra las 1.000 contraseñas.
+
+5. **Iniciar el servidor local:**
    * Utilizando Symfony CLI:
      ```bash
      symfony server:start
@@ -460,7 +501,7 @@ Nurse-Simulator/
      php -S localhost:8000 -t public
      ```
 
-5. **Verificar rutas disponibles:**
+6. **Verificar rutas disponibles:**
    ```bash
    php bin/console debug:router
    ```
@@ -471,8 +512,8 @@ Nurse-Simulator/
 
 Para las siguientes fases del proyecto intermodular, están previstas las siguientes mejoras arquitectónicas:
 
-1. **Capa de Abstracción y Persistencia:** Extraer la lógica de manipulación del archivo JSON a un servicio o repositorio (`NurseRepository`), evitando duplicar la lectura de ficheros en el controlador.
-2. **Entidades y DTOs:** Definir modelos de datos con tipado estricto y validaciones de datos (Symfony Validator).
-3. **Seguridad y Criptografía:** Implementar hashing seguro de contraseñas mediante `PasswordHasherInterface` y tokens de autenticación (JWT o sesiones).
-4. **Base de Datos Relacional:** Migración del almacenamiento de JSON a una base de datos mediante **Doctrine ORM** (MySQL / PostgreSQL / SQLite) y migraciones.
+1. ~~**Capa de Abstracción y Persistencia:** repositorio `NurseRepository`.~~ ✅ Hecho en la fase 4.5.
+2. ~~**Base de Datos Relacional:** migración de JSON a **Doctrine ORM** con migraciones.~~ ✅ Hecho en la fase 4.5.
+3. **Seguridad y Criptografía:** ✅ Las contraseñas ya se guardan con hash. Pendiente: tokens de autenticación (JWT o sesiones).
+4. **Validación de datos:** Añadir restricciones con Symfony Validator a la entidad `Nurse`.
 5. **Testing Automatizado:** Cobertura de pruebas unitarias y de integración mediante PHPUnit y WebTestCase de Symfony.

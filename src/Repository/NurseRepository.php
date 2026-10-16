@@ -1,0 +1,31 @@
+<?php
+
+namespace App\Repository;
+
+use App\Entity\Nurse;
+use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
+use Doctrine\Persistence\ManagerRegistry;
+
+/**
+ * @extends ServiceEntityRepository<Nurse>
+ */
+class NurseRepository extends ServiceEntityRepository
+{
+    public function __construct(ManagerRegistry $registry)
+    {
+        parent::__construct($registry, Nurse::class);
+    }
+
+    /**
+     * @return Nurse[]
+     */
+    public function findByEmailOrName(string $username): array
+    {
+        return $this->createQueryBuilder('n')
+            ->where('n.email = :username')
+            ->orWhere('n.name = :username')
+            ->setParameter('username', $username)
+            ->getQuery()
+            ->getResult();
+    }
+}
