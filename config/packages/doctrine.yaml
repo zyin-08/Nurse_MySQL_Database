@@ -6,6 +6,11 @@ doctrine:
         # either here or in the DATABASE_URL env var (see .env file)
         #server_version: '16'
 
+        default_table_options:
+            charset: utf8mb4
+            collation: utf8mb4_unicode_ci
+            engine: InnoDB
+
         profiling_collect_backtrace: '%kernel.debug%'
         use_savepoints: true
     orm:
